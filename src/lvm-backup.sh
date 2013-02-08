@@ -25,9 +25,12 @@
 ##
 
 
-declare -r groupVolumes="host_main_group"
-declare -r volumeLogicalOrigin="host_root"
-declare -r volumeLogicalSpare="host_root_spare"
+declare -r  groupVolumes="host_main_group"
+declare -r  volumeLogicalOrigin="host_root"
+declare -r  volumeLogicalSpare="host_root_spare"
+
+declare -ri codeSuccess=0
+declare -ri codeFailure=1
 
 function initLVM {
     local    devOrigin="/dev/sdaX"
@@ -47,19 +50,58 @@ function printLVMFreeExtents {
     echo -n "${freeExtents}"
 }
 
-function createBackup {
-    local -i freeExtents=0
+function isExistBackupVolume {
+    local -r  volGroup="${groupVolumes}"
+    local -r  volSpareName="${volumeLogicalSpare}"
 
-    freeExtents="$( printLVMFreeExtents )"
-    lvcreate --extents "${freeExtents}" --snapshot /dev/"${groupVolumes}"/"${volumeLogicalOrigin}" --name "${volumeLogicalSpare}"
+    local -ri codeLogicalVolumeSearchSuccess=0
+    local -i  searchResult=${codeLogicalVolumeSearchSuccess}
+
+    lvdisplay -v /dev/${volGroup}/${volSpareName} 1>/dev/null 2>/dev/null \
+        ; searchResult="${?}"
+
+    [ "${searchResult}" != "${codeLogicalVolumeSearchSuccess}" ] \
+        && echo "INFORMATION:${0}:${LINENO}: In group '${volGroup}' do not exist logical volume '${volSpareName}'." >&2 \
+        && return ${codeFailure}
+    return ${codeSuccess}
 }
 
-function restoreFromBackup {
+function createBackupVolume {
+    local -r  volGroup="${groupVolumes}"
+    local -r  volSpareName="${volumeLogicalSpare}"
+
+    local -i freeExtents=0
+
+    isExistBackupVolume 1>/dev/null 2>/dev/null \
+        && echo "INFORMATION:${0}:${LINENO}: In group '${volGroup}' already exist logical volume '${volName}'." >&2 \
+        && return ${codeFailure}
+
+    freeExtents="$( printLVMFreeExtents )"
+    lvcreate --extents "${freeExtents}" --snapshot /dev/"${groupVolumes}"/"${volumeLogicalOrigin}" --name "${volumeLogicalSpare}" \
+        && return ${codeSuccess}
+    return ${codeFailure}
+}
+
+function restoreFromBackupVolume {
     lvconvert --merge /dev/"${groupVolumes}"/"${volumeLogicalSpare}"
 }
 
-function dropBackup {
-    lvremove /dev/"${groupVolumes}"/"${volumeLogicalSpare}"
+function dropBackupVolume {
+    isExistBackupVolume \
+        && lvremove /dev/"${groupVolumes}"/"${volumeLogicalSpare}"
+}
+
+function rotateBackupVolume {
+    local -r  volGroup="${groupVolumes}"
+    local -r  volSpareName="${volumeLogicalSpare}"
+
+    echo "INFORMATION:${0}:${LINENO}: Removing in group '${volGroup}' logical volume '${volSpareName}'." >&2
+
+    dropBackupVolume
+
+    echo "INFORMATION:${0}:${LINENO}: Creating in group '${volGroup}' new spare logical volume '${volSpareName}'." >&2
+
+    createBackupVolume
 }
 
 function showDoc {
@@ -72,9 +114,11 @@ USAGE IS
 
 OPTIONS
 
+    --move-ahead - Drop previous (if any) and create new spare volume.
+
     --create-spare  -  Create spare volume.
 
-    --drop-spare  -  Remove backup volume.
+    --drop-spare  -  Remove spare volume.
 
     --restore  -  Restore from spare volume: merge spare into origin.
 
@@ -97,7 +141,8 @@ This is free software: you are free to change and redistribute it. There is NO W
 
 [ ${UID} != 0 ] \
     && echo "ERROR:${0}:${LINENO}: This script is run NOT as root. Bailing out." >&2 \
-    && errorState=${errorMisc}
+    && errorState=${errorMisc} \
+    && exit ${errorState}
 
 [ ${#} == 0 ] \
     && showDoc \
@@ -115,6 +160,10 @@ while [ ${#} != 0 ] ; do
 
 # Actions
 
+    move-ahead)
+        [ -z "${routineName}" ] \
+            && routineName="${argumentName}"
+    ;;
     create-spare)
         [ -z "${routineName}" ] \
             && routineName="${argumentName}"
@@ -144,14 +193,17 @@ while [ ${#} != 0 ] ; do
 done
 
 case "${routineName}" in
+move-ahead)
+    rotateBackupVolume
+;;
 create-spare)
-    createBackup
+    createBackupVolume
 ;;
 drop-spare)
-    dropBackup
+    dropBackupVolume
 ;;
 restore)
-    restoreFromBackup
+    restoreFromBackupVolume
 ;;
 *)
     echo "ERROR:${0}:${LINENO}: Unknown routine name '${routineName}'." >&2
